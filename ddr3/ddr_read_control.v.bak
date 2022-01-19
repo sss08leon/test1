@@ -1,0 +1,477 @@
+//=========================== KEDACOM Corporation======================
+//      Information contained in this Confidential and Proprietary work has
+//      been obtained by KEDACOM Corporation. This Design may be used only as
+//      authorized by a Licensing Agreement from KEDACOM Corporation.
+//===================================================================
+//          KEDACOM
+//Address:  No131 Jinshan Rd. New District,  Suzhou City,  Jiangsu Province, China
+//Zip code: 215011
+//Tel:      0512-68418188
+//Fax:      0512-68412699 
+//==============================================================
+//      Description
+//===============================================================
+//      Version            date               author       
+//      
+//
+//      Revision History
+//         
+//          
+//==================================================================
+// synopsys translate_off
+`timescale 1ns/1ps
+// synopsys translate_on
+`define SIMULATION
+
+module  ddr_read_control (  
+    input   wire            i_rst_n                 ,
+    input   wire            i_sclk                  ,
+    input   wire            i_soft_rst              ,
+    
+    input   wire    [3:0]   i_sub_space_num         ,  // [26:23]: channel, [22:21]: fram, [20:10]row,       [9:0]col,
+    input   wire    [11:0]  i_read_numb             ,  // the max number is 1024
+    input   wire            i_ddr_vpo_prio_ini_vld  ,
+    input   wire    [15:0]  i_ddr_vpo_prio_ini      ,
+    
+    input   wire            i_syn_v                 ,  // must have a width of several sclk
+    input   wire            i_ddr_req               ,  // 3 pixel clock width;
+    input   wire    [11:0]  i_start_row_line        ,
+    ////////////////double-ports ram interface/////////
+    output  wire    [7:0]   o_read_ram_addr         ,
+    output  wire            o_read_ram_we           ,
+    output  wire    [127:0] o_read_ram_data         ,
+    ////////////////ddr arbit interface/////////////
+    output  reg             o_ddr_vpo_req           ,
+    input   wire            i_ddr_vpo_ack           ,
+    output  reg     [26:0]  o_ddr_vpo_start_addr    ,
+    output  wire    [11:0]  o_ddr_vpo_data_length   ,
+    output  wire    [15:0]  o_ddr_vpo_priority      ,
+    input   wire            i_ddr_vpo_rdata_vld     ,
+    input   wire    [127:0] i_ddr_vpo_rdata         ,
+    input   wire            i_ddr_vpo_end           ,
+    /////////////////////////////////////////////////
+    input   wire    [1:0]   i_frame_numb            ,
+    output  reg             o_ddr_req_lose
+);
+//***************************************************************************************************************************************
+localparam  IDLE        = 2'd0;
+localparam  WAITE_ACK   = 2'd1;
+localparam  SEND_DATA   = 2'd2;
+///////////////////////////////////////////////
+reg[1:0]    state,  next_state;
+reg[7:0]    col_cnt;
+reg[10:0]   row_cnt;
+reg[1:0]    frame_cnt;
+
+reg         ddr_req;
+wire        last_data;
+
+
+reg[15:0]   ddr_priority;
+reg[15:0]   ddr_priority_ts;
+reg         ddr_vpo_priority_vld_d1;
+reg         ddr_vpo_priority_vld_d2;
+assign      o_ddr_vpo_priority = ddr_priority;
+//*****************************************************************************************   
+reg         syn_v_d1,   syn_v_d2,   syn_v_d3;
+reg         ddr_req_d1, ddr_req_d2, ddr_req_d3;
+always@(negedge i_rst_n or posedge i_sclk)
+begin
+    if (i_rst_n==1'b0)
+    begin
+        syn_v_d1<=1'b0;
+        syn_v_d2<=1'b0;
+        syn_v_d3<=1'b0;
+        
+        ddr_req_d1<=1'b0;
+        ddr_req_d2<=1'b0;
+        ddr_req_d3<=1'b0;
+    end 
+    else
+    begin
+        if (i_soft_rst==1'b1)
+        begin
+            syn_v_d1<=1'b0;
+            syn_v_d2<=1'b0;
+            syn_v_d3<=1'b0;
+            
+            ddr_req_d1<=1'b0;
+            ddr_req_d2<=1'b0;
+            ddr_req_d3<=1'b0;
+        end
+        else
+        begin
+            syn_v_d1<=i_syn_v;
+            syn_v_d2<=syn_v_d1;
+            syn_v_d3<=syn_v_d2;
+            
+            ddr_req_d1<=i_ddr_req;
+            ddr_req_d2<=ddr_req_d1;
+            ddr_req_d3<=ddr_req_d2; 
+        end 
+    end
+end
+wire    pos_vs      = (syn_v_d2   == 1'b1 && syn_v_d3   == 1'b0) ? 1'b1 : 1'b0;
+wire    neg_vs      = (syn_v_d2   == 1'b0 && syn_v_d3   == 1'b1) ? 1'b1 : 1'b0;
+wire    pos_ddr_req = (ddr_req_d2 == 1'b1 && ddr_req_d3 == 1'b0) ? 1'b1 : 1'b0;
+/////////////////////////////////////////////////////////////
+always@(negedge i_rst_n or posedge i_sclk)
+begin
+    if (i_rst_n==1'b0)
+    begin
+        ddr_req<=1'b0;
+    end 
+    else
+    begin
+        if (i_soft_rst==1'b1)
+        begin
+            ddr_req<=1'b0;
+        end
+        else
+        begin
+//            if (pos_ddr_req==1'b1 || neg_vs == 1'b1)
+            if (pos_ddr_req==1'b1)
+            begin
+                ddr_req<=1'b1;
+            end 
+            else if (i_ddr_vpo_ack==1'b1)
+            begin
+                ddr_req<=1'b0;
+            end
+        end
+    end
+end
+//**************************************************************************************
+always@(negedge i_rst_n or posedge i_sclk)
+begin
+    if (i_rst_n==1'b0)
+    begin
+        o_ddr_req_lose<=1'b0;
+    end
+    else
+    begin
+        if (i_soft_rst==1'b1)
+        begin
+            o_ddr_req_lose<=1'b0;
+        end
+        else
+        begin
+            if (ddr_req==1'b1 && pos_ddr_req==1'b1 && i_ddr_vpo_ack==1'b0)
+            begin
+                o_ddr_req_lose<=1'b1;
+            end
+            else
+            begin
+                o_ddr_req_lose<=1'b0; 
+            end
+        end
+    end
+end
+//**********************************************************************************************
+always@(negedge i_rst_n or posedge i_sclk)
+begin
+    if (i_rst_n==1'b0)
+    begin
+        state[1:0]<=IDLE;
+    end 
+    else
+    begin
+        if (i_soft_rst==1'b1)
+        begin
+            state[1:0]<=IDLE; 
+        end 
+        else
+        begin
+            state[1:0]<=next_state[1:0]; 
+        end
+    end
+end
+//////////////////////////////////////////////////////
+always@*
+begin
+    case(state[1:0])
+        IDLE:       begin
+                        if (ddr_req==1'b1)
+                        begin
+                            next_state[1:0] = WAITE_ACK;
+                        end
+                        else
+                        begin
+                            next_state[1:0] = IDLE;
+                        end
+                    end
+        WAITE_ACK:  begin
+                        if (i_ddr_vpo_ack==1'b1)
+                        begin
+                            next_state[1:0] = SEND_DATA;
+                        end
+                        else
+                        begin
+                            next_state[1:0] = WAITE_ACK;
+                        end
+                    end
+        SEND_DATA:  begin
+//                        if (last_data==1'b1)
+                        if (i_ddr_vpo_end==1'b1)
+                        begin
+                            if (ddr_req==1'b1)
+                            begin
+                                next_state[1:0] = WAITE_ACK;
+                            end
+                            else
+                            begin
+                                next_state[1:0] = IDLE;
+                            end
+                        end
+                        else
+                        begin
+                            next_state[1:0] = SEND_DATA;
+                        end
+                    end      
+        default:    begin
+                        next_state[1:0] = IDLE;
+                    end                                    
+    endcase 
+end
+
+always @ (posedge i_sclk or negedge i_rst_n)
+begin
+    if (i_rst_n == 1'b0) begin
+        ddr_vpo_priority_vld_d1 <=  1'b0;
+        ddr_vpo_priority_vld_d2 <=  1'b0;
+    end
+    else begin
+        if (i_soft_rst == 1'b1) begin
+            ddr_vpo_priority_vld_d1 <=  1'b0;
+            ddr_vpo_priority_vld_d2 <=  1'b0;
+        end
+        else begin
+            ddr_vpo_priority_vld_d1 <=  i_ddr_vpo_prio_ini_vld;
+            ddr_vpo_priority_vld_d2 <=  ddr_vpo_priority_vld_d1;
+        end
+    end
+end
+
+always@(posedge i_sclk or negedge i_rst_n)
+begin
+    if (i_rst_n == 1'b0) begin
+        ddr_priority_ts[15:0]    <=  16'hFFFF  ;
+    end
+    else begin
+        if (i_soft_rst == 1'b1) begin
+            ddr_priority_ts[15:0]    <=  16'hFFFF  ;
+        end
+        else begin
+            if (ddr_vpo_priority_vld_d2 == 1'b1 && pos_vs == 1'b1) begin
+                ddr_priority_ts[15:0]  <= i_ddr_vpo_prio_ini[15:0]  ;
+            end
+        end
+    end
+end
+
+always @ (posedge i_sclk or negedge i_rst_n)
+begin
+    if (i_rst_n == 1'b0) begin
+        ddr_priority[15:0]    <=  16'hFFFF  ;
+    end
+    else begin
+        if (i_soft_rst == 1'b1) begin
+            ddr_priority[15:0]    <=  16'hFFFF  ;
+        end
+        else begin
+            if (state[1:0] == WAITE_ACK) begin
+                if (ddr_priority[15:0] == 16'd0) begin
+                    ddr_priority[15:0] <= ddr_priority[15:0];
+                end
+                else begin
+                    ddr_priority[15:0] <=  ddr_priority[15:0] - 1'b1  ;
+                end
+            end
+            else begin
+                ddr_priority[15:0]    <=  ddr_priority_ts[15:0]  ;
+            end
+        end
+    end
+end
+//*************************************************************************************************
+always@(negedge i_rst_n or posedge i_sclk)
+begin
+    if (i_rst_n==1'b0)
+    begin
+        col_cnt[7:0]<=8'd0; 
+    end    
+    else
+    begin
+        if (i_soft_rst==1'b1)
+        begin
+            col_cnt[7:0]<=8'd0; 
+        end 
+        else
+        begin
+            if (state[1:0]==SEND_DATA)
+            begin
+                if (i_ddr_vpo_rdata_vld==1'b1)
+                begin
+                    col_cnt[7:0]<=col_cnt[7:0] + 1'b1;
+                end 
+            end
+            else
+            begin
+                col_cnt[7:0]<=8'd0;
+            end
+        end
+    end
+end
+/////////////////////////////////////////////////////////////////////
+//assign last_data = (col_cnt[7:0]==i_read_numb[11:3])? 1'b1 : 1'b0;          // 128/16=8
+////////////////////////////////////////////////////////////////////////////////////////////////////
+always@(negedge i_rst_n or posedge i_sclk)
+begin
+    if (i_rst_n==1'b0)
+    begin
+        row_cnt[10:0]<=11'd0;
+    end 
+    else
+    begin
+        if (i_soft_rst==1'b1)
+        begin
+            row_cnt[10:0]<=11'd0;
+        end  
+        else
+        begin
+//            if (syn_v_d2==1'b1)
+            if (pos_vs==1'b1)
+            begin
+                row_cnt[10:0]<=i_start_row_line[10:0];
+            end 
+            else
+            begin
+//                if (state[1:0]==SEND_DATA && last_data==1'b1)
+                if (state[1:0]==SEND_DATA && i_ddr_vpo_end==1'b1)
+                begin
+                    row_cnt[10:0]<= row_cnt[10:0] + 1'b1; 
+                end 
+            end
+        end
+    end
+end
+///////////////////////////////////////////////////////////////////////////////
+always@(negedge i_rst_n or posedge i_sclk)
+begin
+    if (i_rst_n==1'b0)
+    begin
+        frame_cnt[1:0]<=2'd0; 
+    end 
+    else
+    begin
+        if (i_soft_rst==1'b1)
+        begin
+            frame_cnt[1:0]<=2'd0; 
+        end
+        else
+        begin
+            if (pos_vs==1'b1)
+            begin
+`ifdef SIMULATION 
+                frame_cnt[1:0]<=i_frame_numb[1:0] + 1'b1; // just for simulation   tbai  20140109 
+`else            
+                frame_cnt[1:0]<=i_frame_numb[1:0];
+`endif               
+            end 
+        end
+    end
+end
+//********************************************************************************************
+// assign o_read_ram_addr[8:0] = {col_cnt[7:5],row_cnt[0],col_cnt[4:0]};
+assign o_read_ram_addr[7:0] =  col_cnt[7:0];  // --gzd@20161122
+assign o_read_ram_we        = (state[1:0]==SEND_DATA)? i_ddr_vpo_rdata_vld : 1'b0;
+//***********************************************************************************************
+always@(negedge i_rst_n or posedge i_sclk)
+begin
+    if (i_rst_n==1'b0)
+    begin
+        o_ddr_vpo_req<=1'b0;
+    end 
+    else
+    begin
+        if (i_soft_rst==1'b1)
+        begin
+            o_ddr_vpo_req<=1'b0; 
+        end 
+        else
+        begin
+            if (next_state[1:0]==WAITE_ACK)
+            begin
+                o_ddr_vpo_req<=1'b1;
+            end
+            else
+            begin
+                o_ddr_vpo_req<=1'b0;
+            end
+        end
+    end
+end
+///////////////////////////////////////////////////////////////////////
+reg     [3:0]   sub_space_num;
+always @ (posedge i_sclk or negedge i_rst_n)
+begin
+    if (i_rst_n == 1'b0) begin
+        sub_space_num  <=  3'd0;
+    end
+    else begin
+        if (i_soft_rst == 1'b1) begin
+            sub_space_num  <=  3'd0;
+        end
+        else begin
+            if (pos_vs == 1'b1) begin
+                sub_space_num  <=  i_sub_space_num;
+            end
+        end
+    end
+end
+
+always@(negedge i_rst_n or posedge i_sclk)
+begin
+    if (i_rst_n==1'b0)
+    begin
+        o_ddr_vpo_start_addr[26:0]<=27'd0;
+    end 
+    else
+    begin
+        if (i_soft_rst==1'b1)
+        begin
+            o_ddr_vpo_start_addr[26:0]<=27'd0;
+        end
+        else
+        begin
+            // o_ddr_vpo_start_addr[26:0]<={i_sub_space_num[3:0],frame_cnt[1:0],row_cnt[10:0],10'd0};
+            o_ddr_vpo_start_addr[26:0]<={sub_space_num[3:0],frame_cnt[1:0],row_cnt[10:0],10'd0};
+        end 
+    end
+end
+///////////////////////////////////////////////////////////////////////////////
+assign o_ddr_vpo_data_length[11:0] = i_read_numb[11:0];  
+
+//assign o_ddr_vpo_data_length[11:0] = 13'd2048;  //test by wangwei 0315
+assign o_read_ram_data[127:0]      = i_ddr_vpo_rdata[127:0];
+//*******************************************************************************************************************
+//always@(negedge i_rst_n or posedge i_sclk)
+//begin
+//    if (i_rst_n==1'b0)
+//    begin
+//        o_ddr_vpo_end<=1'b0;
+//    end
+//    else
+//    begin
+//        if (i_soft_rst==1'b1)
+//        begin
+//            o_ddr_vpo_end<=1'b0; 
+//        end 
+//        else
+//        begin
+//            o_ddr_vpo_end<=last_data;
+//        end
+//    end
+//end
+//**********************************************************************************************************
+endmodule
